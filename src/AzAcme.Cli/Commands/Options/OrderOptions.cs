@@ -13,7 +13,7 @@ namespace AzAcme.Cli.Commands.Options
         public string AccountSecretName { get; set; }
 
         [Option("certificate", Required = true, HelpText = "Name of certificate resource in Key Vault.")]
-        public string Certificate { get; internal set; }
+        public string Certificate { get; set; }
 
         [Option("server", Required = true, HelpText = "ACME Server URI.")]
         public Uri Server { get; set; }
