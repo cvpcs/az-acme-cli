@@ -1,9 +1,9 @@
-﻿using AzAcme.Core.Exceptions;
-using AzAcme.Core.Providers.Helpers;
+﻿using AzAcme.Core.Providers.Helpers;
 using AzAcme.Core.Providers.Models;
-using Microsoft.Azure.Management.Dns;
-using Microsoft.Azure.Management.Dns.Models;
-using Microsoft.Azure.Management.ResourceManager.Fluent.Core;
+using Azure.Core;
+using Azure.ResourceManager;
+using Azure.ResourceManager.Dns;
+using Azure.ResourceManager.Dns.Models;
 using Microsoft.Extensions.Logging;
 
 namespace AzAcme.Core.Providers.AzureDns
@@ -11,18 +11,16 @@ namespace AzAcme.Core.Providers.AzureDns
     public class AzureDnsZone : IDnsZone
     {
         private readonly ILogger logger;
-        private readonly DnsManagementClient client;
-        private ResourceId azureDnsResource;
+        private readonly ArmClient client;
+        private ResourceIdentifier azureDnsResource;
         private string zoneName;
 
-        public AzureDnsZone(ILogger logger, DnsManagementClient client, string azureDnsZoneResourceId, string? zoneOverride)
+        public AzureDnsZone(ILogger logger, ArmClient client, string azureDnsZoneResourceId, string? zoneOverride)
         {
-            this.azureDnsResource = ResourceId.FromString(azureDnsZoneResourceId);
+            this.azureDnsResource = ResourceIdentifier.Parse(azureDnsZoneResourceId);
             this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
             this.client = client ?? throw new ArgumentNullException(nameof(client));
-            this.client.SubscriptionId = azureDnsResource.SubscriptionId;
             this.zoneName = !string.IsNullOrEmpty(zoneOverride) ? zoneOverride : this.azureDnsResource.Name;
-            
         }
 
         public async Task<Order> SetTxtRecords(Order order)
@@ -57,10 +55,10 @@ namespace AzAcme.Core.Providers.AzureDns
         private async Task RemoveTxtRecord(DnsChallenge challenge)
         {
             // Load all then filter
-            var recordSets = await client.RecordSets.ListByTypeAsync(azureDnsResource.ResourceGroupName, azureDnsResource.Name, Microsoft.Azure.Management.Dns.Models.RecordType.TXT);
+            var recordSets = client.GetDnsZoneResource(azureDnsResource).GetDnsTxtRecords();
 
             // ReSharper disable once ReplaceWithSingleCallToFirstOrDefault
-            var records = recordSets.Where(x => x.Name == challenge.TxtRecord).FirstOrDefault();
+            var records = recordSets.Where(x => (x.HasData ? x.Get() : x).Data.Name == challenge.TxtRecord).FirstOrDefault();
             
             if (records == null)
             {
@@ -69,33 +67,37 @@ namespace AzAcme.Core.Providers.AzureDns
             else
             {
                 this.logger.LogDebug("Removing TXT record set '{0}'.", challenge.TxtRecord);
-                await client.RecordSets.DeleteAsync(azureDnsResource.ResourceGroupName, azureDnsResource.Name, challenge.TxtRecord, RecordType.TXT);
+                await records.DeleteAsync(Azure.WaitUntil.Completed);
             }
         }
 
         private async Task UpdateTxtRecord(DnsChallenge challenge)
         {
-            var recordSets = await client.RecordSets.ListByTypeAsync(azureDnsResource.ResourceGroupName, azureDnsResource.Name, Microsoft.Azure.Management.Dns.Models.RecordType.TXT);
+            var recordSets = client.GetDnsZoneResource(azureDnsResource).GetDnsTxtRecords();
 
             // ReSharper disable once ReplaceWithSingleCallToFirstOrDefault
-            var records = recordSets.Where(x => x.Name == challenge.TxtRecord).FirstOrDefault();
+            var records = recordSets.Where(x => (x.HasData ? x.Get() : x).Data.Name == challenge.TxtRecord).FirstOrDefault();
 
             if (records == null)
             {
                 this.logger.LogDebug("DNS Records do not exist for '{0}'. Creating.",challenge.TxtRecord);
-                records = new RecordSet();
-                records.TTL = 60;
-                records.TxtRecords = new List<TxtRecord> { new TxtRecord(new List<string>() { challenge.TxtValue }) };
+                var recordInfo = new DnsTxtRecordInfo();
+                recordInfo.Values.Add(challenge.TxtValue);
+                var recordData = new DnsTxtRecordData();
+                recordData.TtlInSeconds = 60;
+                recordData.DnsTxtRecords.Add(recordInfo);
 
-                var result = client.RecordSets.CreateOrUpdate(azureDnsResource.ResourceGroupName, azureDnsResource.Name, challenge.TxtRecord, RecordType.TXT, records);
+                var result = await recordSets.CreateOrUpdateAsync(Azure.WaitUntil.Completed, challenge.TxtRecord, recordData);
             }
             else
             {
-                if (!(records.TxtRecords.Any(txt => txt.Value.Any(val => val == challenge.TxtValue))))
+                if (!(records.Data.DnsTxtRecords.Any(txt => txt.Values.Any(val => val == challenge.TxtValue))))
                 {
                     this.logger.LogDebug("Updating DNS Record for '{0}'.", challenge.TxtRecord);
-                    records.TxtRecords.Add(new TxtRecord(new List<string>() { challenge.TxtValue }));
-                    var result = client.RecordSets.Update(azureDnsResource.ResourceGroupName, azureDnsResource.Name, challenge.TxtRecord, RecordType.TXT, records);
+                    var recordInfo = new DnsTxtRecordInfo();
+                    recordInfo.Values.Add(challenge.TxtValue);
+                    records.Data.DnsTxtRecords.Add(recordInfo);
+                    var result = await recordSets.CreateOrUpdateAsync(Azure.WaitUntil.Completed, records.Data.Name, records.Data);
                 }
                 else
                 {
